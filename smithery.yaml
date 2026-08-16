@@ -1,0 +1,20 @@
+# Smithery configuration for the CarrierScore MCP server.
+# This is an externally-hosted remote server (Streamable HTTP at
+# https://mcp.carrierscore.io/mcp) — Smithery's scanner also reads
+# title/description/websiteUrl/icons from the server's `initialize`
+# response (serverInfo).
+
+name: carrierscore
+displayName: CarrierScore
+description: >-
+  FMCSA motor-carrier risk scores, monitoring, and Montgomery
+  carrier-selection evidence reports for freight brokers and AI booking
+  agents.
+homepage: https://carrierscore.io
+iconUrl: https://carrierscore.io/icon-512.png
+repository: https://github.com/csprout3/carrierscore-mcp
+
+# Remote endpoint (no local install required)
+remote:
+  type: streamable-http
+  url: https://mcp.carrierscore.io/mcp

@@ -1,3 +1,5 @@
+<img src="https://carrierscore.io/icon-512.png" alt="CarrierScore" width="96" align="right">
+
 # CarrierScore MCP Server
 
 FMCSA motor-carrier risk intelligence for AI agents, over the [Model Context Protocol](https://modelcontextprotocol.io).

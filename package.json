@@ -1,6 +1,6 @@
 {
   "name": "carrierscore-mcp-server",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "MCP server for CarrierScore: FMCSA carrier risk scores and Montgomery carrier-selection evidence files",
   "type": "module",
   "main": "dist/index.js",

@@ -119,11 +119,125 @@ const dotNumberField = z
   .regex(/^\d{1,8}$/, "DOT number must be 1-8 digits")
   .describe("US DOT number of the carrier, digits only (e.g. \"1234567\")");
 
+// --- output schemas ----------------------------------------------------------
+// Mirror the REST API's response shapes (serving/core.py). Loosely-typed maps
+// (component dict) use record/passthrough so the schema never rejects a real
+// API response; identity fields are nullable+optional because the census row
+// may omit or null any of them.
+
+const nullableString = z.string().nullable().optional();
+const nullableNumber = z.number().nullable().optional();
+
+const carrierIdentityShape = {
+  dot_number: z.string().describe("US DOT number"),
+  legal_name: nullableString.describe("Registered legal name"),
+  dba_name: nullableString.describe("Doing-business-as name, if any"),
+  status_code: nullableString.describe("FMCSA operating status code (e.g. \"A\" = active)"),
+  safety_rating: nullableString.describe("FMCSA safety rating code (e.g. \"S\" = satisfactory)"),
+  power_units: nullableNumber.describe("Fleet size: number of power units"),
+  total_drivers: nullableNumber.describe("Total drivers reported"),
+  phy_street: nullableString,
+  phy_city: nullableString,
+  phy_state: nullableString,
+  phy_zip: nullableString,
+  add_date: nullableString.describe("Date added to the FMCSA census (YYYY-MM-DD)"),
+  mcs150_date: nullableString.describe("Latest MCS-150 filing date (YYYY-MM-DD)"),
+};
+
+const scoreComponentSchema = z
+  .object({
+    label: z.string().describe("Human-readable component label"),
+    value: z.number().nullable().optional().describe("Raw component value"),
+    percentile: z
+      .number()
+      .nullable()
+      .optional()
+      .describe("Population percentile of the value, 0-1"),
+    weight: z.number().optional().describe("Component weight in the base score"),
+  })
+  .passthrough();
+
+const scoreFieldsShape = {
+  dot_number: z.string().describe("US DOT number"),
+  legal_name: nullableString,
+  carrier_score: nullableNumber.describe("CarrierScore 0-100, higher = riskier"),
+  base_score: nullableNumber.describe("Score before hard-flag surcharges"),
+  surcharge: nullableNumber.describe("Additional points from hard flags"),
+  components: z
+    .record(scoreComponentSchema)
+    .describe("Score components keyed by component name"),
+  flags: z.array(z.string()).describe("Hard flags (OOS order, no insurance, reincarnation link)"),
+  data_sufficiency: nullableNumber.describe(
+    "0-1: share of the score resting on observed vs neutral-imputed data",
+  ),
+  scored_as_of: nullableString.describe("Date of the scoring run (YYYY-MM-DD)"),
+  disclaimer: z.string().optional().describe("Methodology disclaimer — relay verbatim"),
+};
+
+// Montgomery output covers both formats: format="text" fills report_text only;
+// format="json" fills the structured fields (score payload + report header
+// fields). Everything except report_text/dot_number overlaps with score output.
+const montgomeryOutputShape = {
+  report_text: z
+    .string()
+    .optional()
+    .describe("Filing-ready plain-text evidence report (format=\"text\")"),
+  report: z.string().optional().describe("Report title line (format=\"json\")"),
+  generated: nullableString.describe("Report generation date (YYYY-MM-DD)"),
+  dot_number: z.string().optional(),
+  legal_name: nullableString,
+  dba_name: nullableString,
+  safety_rating: nullableString,
+  status_code: nullableString,
+  power_units: nullableNumber,
+  carrier_score: nullableNumber.describe("CarrierScore 0-100, higher = riskier"),
+  base_score: nullableNumber,
+  surcharge: nullableNumber,
+  components: z.record(scoreComponentSchema).optional(),
+  flags: z.array(z.string()).optional(),
+  data_sufficiency: nullableNumber,
+  scored_as_of: nullableString,
+  disclaimer: z.string().optional(),
+};
+
+const monitorCarrierSchema = z
+  .object({
+    dot_number: z.string(),
+    legal_name: z.string().nullable().optional(),
+    carrier_score: z.number().nullable().optional().describe("0-100, higher = riskier"),
+    data_sufficiency: z.number().nullable().optional(),
+    flags: z.array(z.string()).optional(),
+  })
+  .passthrough();
+
+const monitorOutputShape = {
+  scored_as_of: nullableString.describe("Date of the scoring run (YYYY-MM-DD)"),
+  requested: z.number().describe("How many DOT numbers were requested"),
+  found: z.number().describe("How many were found in the scored population"),
+  carriers: z.array(monitorCarrierSchema).describe("Score summary per found carrier"),
+  not_found: z
+    .array(z.string())
+    .describe("Requested DOTs absent from the scored population"),
+  disclaimer: z.string().optional().describe("Methodology disclaimer — relay verbatim"),
+};
+
 // --- server ------------------------------------------------------------------
 
 const server = new McpServer({
   name: "carrierscore-mcp-server",
-  version: "0.1.0",
+  title: "CarrierScore",
+  version: "0.2.0",
+  description:
+    "FMCSA motor-carrier risk scores, monitoring, and Montgomery carrier-selection " +
+    "evidence reports for freight brokers and AI booking agents.",
+  websiteUrl: "https://carrierscore.io",
+  icons: [
+    {
+      src: "https://carrierscore.io/icon-512.png",
+      mimeType: "image/png",
+      sizes: ["512x512"],
+    },
+  ],
 });
 
 server.registerTool(
@@ -138,6 +252,7 @@ Returns JSON: { dot_number, legal_name, dba_name, status_code, safety_rating, po
 
 Errors: 404 if the DOT is not in the FMCSA census (likely a typo or a fraudulent/never-registered carrier — treat as a red flag for booking).`,
     inputSchema: { dot_number: dotNumberField },
+    outputSchema: carrierIdentityShape,
     annotations: {
       readOnlyHint: true,
       destructiveHint: false,
@@ -169,6 +284,7 @@ Interpreting for booking decisions: treat the score as documented decision-suppo
 
 Errors: 404 if the DOT is not in the scored population; 503 if scores have not been computed yet.`,
     inputSchema: { dot_number: dotNumberField },
+    outputSchema: scoreFieldsShape,
     annotations: {
       readOnlyHint: true,
       destructiveHint: false,
@@ -198,7 +314,7 @@ Args:
   - dot_number: US DOT number, digits only
   - format: "text" (default; the filing-ready plain-text report, available on the free tier) or "json" (structured fields; requires an API key on the monitor or compliance tier)
 
-Returns: the plain-text report, or JSON { report, generated, dot_number, legal_name, dba_name, safety_rating, status_code, power_units, carrier_score, components, flags, data_sufficiency, scored_as_of, disclaimer }. Every report embeds the disclaimer verbatim — keep it when storing or quoting the report.
+Returns: format="text" gives the plain-text report (structured field report_text); format="json" gives structured fields { report, generated, dot_number, legal_name, dba_name, safety_rating, status_code, power_units, carrier_score, components, flags, data_sufficiency, scored_as_of, disclaimer }. Every report embeds the disclaimer verbatim — keep it when storing or quoting the report.
 
 Errors: 403 if format=json without an API key; 404 unknown DOT; 503 if scores are not computed yet.`,
     inputSchema: {
@@ -208,6 +324,7 @@ Errors: 403 if format=json without an API key; 404 unknown DOT; 503 if scores ar
         .default("text")
         .describe("\"text\" = filing-ready report (free tier); \"json\" = structured fields (requires API key)"),
     },
+    outputSchema: montgomeryOutputShape,
     annotations: {
       readOnlyHint: true,
       destructiveHint: false,
@@ -221,7 +338,10 @@ Errors: 403 if format=json without an API key; 404 unknown DOT; 503 if scores ar
         `/v1/carrier/${dot_number}/montgomery?format=${format}`,
       );
       if (format === "json") return jsonResult(json);
-      return { content: [{ type: "text" as const, text }] };
+      return {
+        content: [{ type: "text" as const, text }],
+        structuredContent: { report_text: text },
+      };
     } catch (error) {
       return toolError(error);
     }
@@ -249,6 +369,7 @@ Errors: 400 if the list is empty or exceeds 100 (split into batches); 503 if sco
         .max(100)
         .describe("US DOT numbers to check, 1-100 per call"),
     },
+    outputSchema: monitorOutputShape,
     annotations: {
       readOnlyHint: true,
       destructiveHint: false,
